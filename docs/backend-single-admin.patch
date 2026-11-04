@@ -1,0 +1,805 @@
+--- a/README.md
++++ b/README.md
+@@ -114,4 +114,4 @@
+ 
+ ## 运营管理后台
+ 
+-新增独立管理员登录、RBAC、审批、审计、运营指标、用户与面试审阅、商品版本、财务对账等接口。启动、迁移与当前边界见 [后台运行说明](docs/admin-console.md)。
++新增独立管理员登录、RBAC、单人直接操作、审计、运营指标、用户与面试审阅、商品版本、财务对账等接口。启动、迁移与当前边界见 [后台运行说明](docs/admin-console.md)。
+--- a/app/api/admin.py
++++ b/app/api/admin.py
+@@ -10,7 +10,6 @@
+ from app.db.admin_models import (
+     AdminAudit,
+     AdminUser,
+-    Approval,
+     Product,
+     QualityReview,
+     Reconciliation,
+@@ -23,7 +22,6 @@
+ from app.modules.admin.metrics import Metrics
+ from app.modules.admin.security import PERMISSIONS, ROLE_LABELS, permits
+ from app.modules.admin.service import (
+-    APPROVAL_FIELDS,
+     ORDER_FIELDS,
+     PRODUCT_FIELDS,
+     QUALITY_FIELDS,
+@@ -170,7 +168,7 @@
+     return ok(
+         request,
+         service.idem(
+-            "user:grant:" + uid, idempotency_key, data.model_dump(), lambda: service.grant(uid, data)
++            "user:grant:direct:" + uid, idempotency_key, data.model_dump(), lambda: service.grant(uid, data)
+         ),
+     )
+ 
+@@ -303,7 +301,7 @@
+         listing(
+             service.db,
+             RefundRequest,
+-            lambda r: fields(r, "id order_id amount_minor reason status approval_id created_at"),
++            lambda r: fields(r, "id order_id amount_minor reason status created_at"),
+             **p,
+         ),
+     )
+@@ -315,7 +313,7 @@
+ ):
+     return ok(
+         request,
+-        service.idem("refund:create", idempotency_key, data.model_dump(), lambda: service.refund(data)),
++        service.idem("refund:direct", idempotency_key, data.model_dump(), lambda: service.refund(data)),
+     )
+ 
+ 
+@@ -343,7 +341,7 @@
+     return ok(
+         request,
+         service.idem(
+-            "product:publish:" + pid,
++            "product:publish:direct:" + pid,
+             idempotency_key,
+             data.model_dump(),
+             lambda: service.publish(pid, data.reason),
+@@ -369,7 +367,10 @@
+     return ok(
+         request,
+         service.idem(
+-            "payment:" + channel, idempotency_key, data.model_dump(), lambda: service.payment(channel, data)
++            "payment:direct:" + channel,
++            idempotency_key,
++            data.model_dump(),
++            lambda: service.payment(channel, data),
+         ),
+     )
+ 
+@@ -463,48 +464,6 @@
+     return ok(request, m.ai(request.app.state.runtime.settings))
+ 
+ 
+-@router.get("/approvals", response_model=Envelope, dependencies=[Depends(access("approval:read"))])
+-def approvals(request: Request, p=Depends(paging), service=Depends(svc)):
+-    conditions = (
+-        () if permits(service.admin, "approval:review") else (Approval.applicant_id == service.admin.id,)
+-    )
+-    return ok(
+-        request,
+-        listing(
+-            service.db,
+-            Approval,
+-            lambda r: {
+-                **fields(r, APPROVAL_FIELDS),
+-                "snapshot": {
+-                    k: v
+-                    for k, v in service.decrypt_json(r.payload_encrypted, {}).items()
+-                    if k not in ("secret_ref", "merchant_id", "app_id")
+-                },
+-            },
+-            **p,
+-            conditions=conditions,
+-        ),
+-    )
+-
+-
+-@router.post(
+-    "/approvals/{aid}/review", response_model=Envelope, dependencies=[Depends(access("approval:review"))]
+-)
+-def approval_review(
+-    request: Request,
+-    aid: str,
+-    data: schema.ApprovalReview,
+-    idempotency_key: str = Header(...),
+-    service=Depends(svc),
+-):
+-    return ok(
+-        request,
+-        service.idem(
+-            "approval:review:" + aid, idempotency_key, data.model_dump(), lambda: service.review(aid, data)
+-        ),
+-    )
+-
+-
+ @router.get("/admin-users", response_model=Envelope, dependencies=[Depends(access("system:read"))])
+ def admins(request: Request, p=Depends(paging), service=Depends(svc)):
+     return ok(request, listing(service.db, AdminUser, AdminAuth.view, **p))
+--- a/app/modules/admin/security.py
++++ b/app/modules/admin/security.py
+@@ -20,7 +20,6 @@
+         "product:read",
+         "product:write",
+         "ai:read",
+-        "approval:read",
+     },
+     "SUPPORT": {
+         "dashboard:read",
+@@ -29,7 +28,6 @@
+         "interview:read",
+         "report:retry",
+         "entitlement:grant",
+-        "approval:read",
+     },
+     "QUALITY": {
+         "interview:read",
+@@ -47,10 +45,8 @@
+         "payment:read",
+         "payment:write",
+         "reconciliation:write",
+-        "approval:read",
+-        "approval:review",
+     },
+-    "AUDITOR": {"system:read", "audit:read", "approval:read"},
++    "AUDITOR": {"system:read", "audit:read"},
+ }
+ ROLE_LABELS = {
+     "SUPER_ADMIN": "超级管理员",
+--- a/app/modules/admin/service.py
++++ b/app/modules/admin/service.py
+@@ -6,12 +6,11 @@
+ from sqlalchemy import func, select, update
+ 
+ from app.core.errors import require
+-from app.core.security import utcnow
++from app.core.security import new_id, utcnow
+ from app.db.admin_models import (
+     AdminIdempotency,
+     AdminSession,
+     AdminUser,
+-    Approval,
+     PaymentConfig,
+     Product,
+     QualityReview,
+@@ -31,7 +30,6 @@
+ PRODUCT_FIELDS = "id code version name kind amount_minor original_minor credits validity_days currency description status published_at created_at"
+ ORDER_FIELDS = "id user_id product_code amount_minor credits currency status paid_at refunded_at provider_trade_no created_at"
+ QUALITY_FIELDS = "id interview_id assignee_id created_by reason status tags conclusion created_at"
+-APPROVAL_FIELDS = "id applicant_id reviewer_id kind resource_id reason status review_note created_at"
+ 
+ 
+ class AdminService(Service):
+@@ -103,25 +101,34 @@
+         self.audit("USER_" + data.status, uid, data.reason)
+         return {"id": uid, "status": row.status}
+ 
+-    def approval(self, kind, resource, payload, reason):
+-        row = Approval(
+-            applicant_id=self.admin.id,
+-            kind=kind,
+-            resource_id=resource,
+-            payload_encrypted=self.encrypt_json(payload),
+-            reason=reason,
+-        )
+-        self.db.add(row)
+-        self.db.flush()
+-        self.audit("APPROVAL_CREATED", row.id, reason)
+-        return fields(row, APPROVAL_FIELDS)
+-
+     def grant(self, uid, data):
+-        row = self.get(User, uid)
+-        require(row.status == "ACTIVE", "USER_INVALID_STATE", "仅能给正常账号补发权益", 409)
+-        return self.approval(
+-            "ENTITLEMENT_GRANT", uid, data.model_dump(), data.reason + " 工单:" + data.ticket
+-        )
++        result = self.db.execute(
++            update(User)
++            .where(User.id == uid, User.status == "ACTIVE")
++            .values(credits=User.credits + data.quantity)
++        )
++        require(result.rowcount == 1, "USER_INVALID_STATE", "仅能给正常账号补发权益", 409)
++        entry = Usage(
++            user_id=uid,
++            usage_type="ADMIN_GRANT",
++            quantity=data.quantity,
++            status="GRANTED",
++            idempotency_key="admin-grant:" + new_id(),
++        )
++        self.db.add(entry)
++        self.db.flush()
++        self.audit("ENTITLEMENT_GRANTED", uid, data.reason)
++        if data.ticket:
++            self.audit("ENTITLEMENT_TICKET", entry.id, data.ticket)
++        user = self.get(User, uid)
++        self.db.refresh(user)
++        return {
++            "id": entry.id,
++            "user_id": uid,
++            "quantity": data.quantity,
++            "remaining_interviews": user.credits,
++            "status": entry.status,
++        }
+ 
+     def interview(self, iid):
+         row = self.get(Interview, iid)
+@@ -269,10 +276,25 @@
+         return fields(row, PRODUCT_FIELDS)
+ 
+     def publish(self, pid, reason):
+-        row = self.db.scalar(select(Product).where(Product.id == pid).with_for_update())
+-        require(row and row.status == "DRAFT", "PRODUCT_INVALID_STATE", "仅草稿可以提交发布审批", 409)
+-        row.status = "IN_REVIEW"
+-        return self.approval("PRODUCT_PUBLISH", pid, fields(row, "code version amount_minor credits"), reason)
++        row = self.get(Product, pid)
++        # Lock a SKU's versions in the same order, so concurrent publishes cannot
++        # leave multiple versions active or retire a newer version accidentally.
++        versions = self.db.scalars(
++            select(Product)
++            .where(Product.code == row.code)
++            .order_by(Product.version)
++            .with_for_update()
++            .execution_options(populate_existing=True)
++        ).all()
++        require(row.status in ("DRAFT", "IN_REVIEW"), "PRODUCT_INVALID_STATE", "仅未发布商品可发布", 409)
++        newest = max((p.version for p in versions if p.status == "PUBLISHED"), default=0)
++        require(newest < row.version, "PRODUCT_STALE_VERSION", "已有更高版本发布", 409)
++        for product in versions:
++            if product.status == "PUBLISHED":
++                product.status = "RETIRED"
++        row.status, row.published_at = "PUBLISHED", utcnow()
++        self.audit("PRODUCT_PUBLISHED", row.id, reason)
++        return fields(row, PRODUCT_FIELDS)
+ 
+     def payment(self, channel, data):
+         require(channel in ("WECHAT", "ALIPAY"), "INVALID_CHANNEL", "渠道不存在", 404)
+@@ -282,7 +304,19 @@
+             "真实支付适配器未配置，当前仅可保存关闭状态的配置",
+             409,
+         )
+-        return self.approval("PAYMENT_CONFIG", channel, data.model_dump(exclude={"reason"}), data.reason)
++        config = self.db.scalar(
++            select(PaymentConfig)
++            .where(PaymentConfig.channel == channel, PaymentConfig.environment == data.environment)
++            .with_for_update()
++        )
++        if not config:
++            config = PaymentConfig(channel=channel, environment=data.environment, version=0)
++            self.db.add(config)
++        config.config_encrypted = self.encrypt_json(data.model_dump(exclude={"reason"}))
++        config.enabled, config.version = data.enabled, config.version + 1
++        self.db.flush()
++        self.audit("PAYMENT_CONFIG_SAVED", config.id, data.reason)
++        return fields(config, "id channel environment enabled version")
+ 
+     def payments(self):
+         rows = self.db.scalars(select(PaymentConfig)).all()
+@@ -302,123 +336,42 @@
+         }
+ 
+     def refund(self, data):
+-        order = self.get(Order, data.order_id)
+-        require(order.status == "PAID", "REFUND_INVALID_STATE", "仅已支付订单可申请退款", 409)
++        order = self.db.scalar(select(Order).where(Order.id == data.order_id).with_for_update())
++        require(order, "RESOURCE_NOT_FOUND", "订单不存在", 404)
++        require(order.status == "PAID", "REFUND_INVALID_STATE", "仅已支付订单可退款", 409)
++        require(
++            (order.provider_trade_no or "").startswith("dev:")
++            and self.rt.settings.environment != "production",
++            "REFUND_ADAPTER_NOT_CONFIGURED",
++            "真实渠道退款适配器尚未配置",
++            503,
++        )
+         require(
+             not self.db.scalar(
+                 select(RefundRequest.id).where(
+-                    RefundRequest.order_id == order.id,
+-                    RefundRequest.status.in_(["PENDING", "APPROVED", "SUCCEEDED"]),
++                    RefundRequest.order_id == order.id, RefundRequest.status == "SUCCEEDED"
+                 )
+             ),
+             "REFUND_EXISTS",
+-            "该订单已有退款申请",
++            "该订单已完成退款",
+             409,
++        )
++        # Supersede unfinished requests from the previous release; they never
++        # execute on their own, and their history remains available in the DB.
++        self.db.execute(
++            update(RefundRequest)
++            .where(RefundRequest.order_id == order.id, RefundRequest.status.in_(["PENDING", "APPROVED"]))
++            .values(status="REJECTED")
+         )
+         row = RefundRequest(
+             order_id=order.id, applicant_id=self.admin.id, amount_minor=order.amount_minor, reason=data.reason
+         )
+         self.db.add(row)
+         self.db.flush()
+-        approval = self.approval("REFUND", row.id, {"order_id": order.id}, data.reason)
+-        row.approval_id = approval["id"]
+-        return {"id": row.id, "approval_id": row.approval_id, "status": row.status}
+-
+-    def review(self, aid, data):
+-        row = self.db.scalar(select(Approval).where(Approval.id == aid).with_for_update())
+-        require(row and row.status == "PENDING", "APPROVAL_INVALID_STATE", "审批不存在或已处理", 409)
+-        require(row.applicant_id != self.admin.id, "APPROVAL_SELF_REVIEW", "不能审核本人提交的申请", 403)
+-        applicant = self.get(AdminUser, row.applicant_id)
+-        required = {
+-            "PRODUCT_PUBLISH": "product:write",
+-            "PAYMENT_CONFIG": "payment:write",
+-            "ENTITLEMENT_GRANT": "entitlement:grant",
+-            "REFUND": "order:refund",
+-        }[row.kind]
+-        require(
+-            applicant.status == "ACTIVE" and permits(applicant, required),
+-            "APPROVAL_APPLICANT_INVALID",
+-            "申请人已停用或权限已变更",
+-            409,
+-        )
+-        payload = self.decrypt_json(row.payload_encrypted)
+-        if data.approve:
+-            if row.kind == "ENTITLEMENT_GRANT":
+-                self.db.execute(
+-                    update(User)
+-                    .where(User.id == row.resource_id, User.status == "ACTIVE")
+-                    .values(credits=User.credits + payload["quantity"])
+-                )
+-                user = self.get(User, row.resource_id)
+-                require(user.status == "ACTIVE", "USER_INVALID_STATE", "用户状态不可补发", 409)
+-                self.db.add(
+-                    Usage(
+-                        user_id=row.resource_id,
+-                        usage_type="ADMIN_GRANT",
+-                        quantity=payload["quantity"],
+-                        status="GRANTED",
+-                        idempotency_key="approval:" + row.id,
+-                    )
+-                )
+-            elif row.kind == "PRODUCT_PUBLISH":
+-                product = self.get(Product, row.resource_id)
+-                require(product.status == "IN_REVIEW", "PRODUCT_INVALID_STATE", "商品不在审核中", 409)
+-                newest = self.db.scalar(
+-                    select(func.max(Product.version)).where(
+-                        Product.code == product.code, Product.status == "PUBLISHED"
+-                    )
+-                )
+-                require(
+-                    not newest or newest < product.version, "PRODUCT_STALE_VERSION", "已有更高版本发布", 409
+-                )
+-                self.db.execute(
+-                    update(Product)
+-                    .where(Product.code == product.code, Product.status == "PUBLISHED")
+-                    .values(status="RETIRED")
+-                )
+-                product.status, product.published_at = "PUBLISHED", utcnow()
+-            elif row.kind == "PAYMENT_CONFIG":
+-                config = self.db.scalar(
+-                    select(PaymentConfig)
+-                    .where(
+-                        PaymentConfig.channel == row.resource_id,
+-                        PaymentConfig.environment == payload["environment"],
+-                    )
+-                    .with_for_update()
+-                )
+-                if not config:
+-                    config = PaymentConfig(
+-                        channel=row.resource_id, environment=payload["environment"], version=0
+-                    )
+-                    self.db.add(config)
+-                config.config_encrypted = self.encrypt_json(payload)
+-                config.enabled, config.version = payload["enabled"], config.version + 1
+-            elif row.kind == "REFUND":
+-                refund = self.get(RefundRequest, row.resource_id)
+-                order = self.get(Order, refund.order_id)
+-                require(
+-                    (order.provider_trade_no or "").startswith("dev:")
+-                    and self.rt.settings.environment != "production",
+-                    "REFUND_ADAPTER_NOT_CONFIGURED",
+-                    "真实渠道退款适配器尚未配置",
+-                    503,
+-                )
+-                BillingService(self.rt, self.db, order.user_id, self.rid).refund(
+-                    order.id, "admin-approval:" + row.id
+-                )
+-                refund.status, refund.provider_refund_no = "SUCCEEDED", "dev:" + refund.id
+-        else:
+-            if row.kind == "PRODUCT_PUBLISH":
+-                self.get(Product, row.resource_id).status = "DRAFT"
+-            if row.kind == "REFUND":
+-                self.get(RefundRequest, row.resource_id).status = "REJECTED"
+-        row.status, row.reviewer_id, row.review_note = (
+-            "APPROVED" if data.approve else "REJECTED",
+-            self.admin.id,
+-            data.reason,
+-        )
+-        self.audit("APPROVAL_" + row.status, aid, data.reason)
+-        return fields(row, APPROVAL_FIELDS)
++        BillingService(self.rt, self.db, order.user_id, self.rid).refund(order.id, "admin-refund:" + row.id)
++        row.status, row.provider_refund_no = "SUCCEEDED", "dev:" + row.id
++        self.audit("ORDER_REFUNDED", order.id, data.reason)
++        return fields(row, "id order_id amount_minor status provider_refund_no")
+ 
+     def quality_create(self, data):
+         self.interview(data.interview_id)
+--- a/app/schemas/admin.py
++++ b/app/schemas/admin.py
+@@ -35,7 +35,7 @@
+ 
+ class EntitlementGrant(Reason):
+     quantity: int = Field(ge=1, le=1000)
+-    ticket: Text = Field(max_length=100)
++    ticket: str = Field("", max_length=100)
+ 
+ 
+ class ProductInput(Reason):
+@@ -53,10 +53,6 @@
+         if self.original_minor < self.amount_minor:
+             raise ValueError("原价不能小于售价")
+         return self
+-
+-
+-class ApprovalReview(Reason):
+-    approve: bool
+ 
+ 
+ class PaymentInput(Reason):
+--- a/docs/admin-console.md
++++ b/docs/admin-console.md
+@@ -4,16 +4,16 @@
+ 
+ 执行 `.venv/bin/python -m alembic upgrade head` 增量新增 12 张管理表，保留原有业务数据；每张新表及字段均提供中文 COMMENT，历史注释快照不改写。迁移版本 `a61d8c4e9201`，基线 `3b9e7c2a4106`。增量 SQL 为 `docs/sql/update_admin_console_mysql.sql`，与 Alembic 二选一。
+ 
+-执行 `.venv/bin/python -m scripts.admin_cli` 创建初始管理员，默认登录名 admin，随机密码写入 `var/admin-bootstrap.json`（0600）。使用 `--login-name reviewer --display-name 复核管理员 --credentials-file var/reviewer-bootstrap.json` 创建独立复核人。设置 `ADMIN_BOOTSTRAP_PASSWORD` 可指定密码，至少 12 位。生产环境自动生成 TOTP 密钥并要求登录验证码，使用验证器录入生成文件中的 `mfa_secret`。
++执行 `.venv/bin/python -m scripts.admin_cli` 创建初始管理员，默认登录名 admin，随机密码写入 `var/admin-bootstrap.json`（0600）。第一期只需一个有相应操作权限的管理员。设置 `ADMIN_BOOTSTRAP_PASSWORD` 可指定密码，至少 12 位。生产环境自动生成 TOTP 密钥并要求登录验证码，使用验证器录入生成文件中的 `mfa_secret`。
+ 
+ 六类角色为 SUPER_ADMIN、OPERATIONS、SUPPORT、QUALITY、FINANCE、AUDITOR。权限矩阵定义于 `app/modules/admin/security.py`，没有后台 UI 可以绕过的角色检查。管理员会话 30 分钟过期；禁用或变更角色会撤销会话。密码使用 scrypt，TOTP 防重放；敏感配置和幂等响应使用现有加密设施。
+ 
+-商品草稿发布、支付配置、补发额度、退款需双人审批，禁止自批；审批使用申请快照并复核申请人有效权限。管理员写操作提供 `Idempotency-Key`，同键异参返回 409。
++第一期取消双人审批：商品草稿发布、支付配置保存、额度补发和退款由有权限的管理员直接执行，保留操作原因、幂等和审计。补发工单号选填。旧审批 API 和角色审批权限已移除，历史审批记录保留且不会自动执行；旧待发布商品可直接发布，旧待退款事项可在订单页重新执行。管理员写操作提供 `Idempotency-Key`，同键异参返回 409。
+ 
+ 媒体/文本审阅要求 `SUPPORT_REVIEW` 当前政策版本授权；质检员另须有效的分派任务。后台不提供代签同意接口。超出保留期限、已删除面试、过期媒体不可审阅，签名 URL 最长 120 秒。签名 URL、转写、私钥不进入管理审计正文。浏览器播放器内存保存播放 URL，到期移除。
+ 
+ ## 明确尚未接入的生产能力
+ 
+-真实微信/支付宝收款、服务端回调验签、KMS 密钥解引用、真实退款及自动拉取账单未实现；支付渠道不可启用，真实退款返回 503，现有开发模拟支付与退款仅用于联调。对账支持导入明确渠道前缀的订单账单与差异处理，不伪造自动拉单。
++支付配置直接保存，真实微信/支付宝收款、服务端回调验签、KMS 密钥解引用、真实退款及自动拉取账单未实现；支付渠道不可启用，真实退款返回 503，现有开发模拟支付与退款仅用于联调。对账支持导入明确渠道前缀的订单账单与差异处理，不伪造自动拉单。
+ 
+ 月/季/年商品为一次性固定额度套餐，暂未执行有效期回收、会员周期重置、自动续费。AI 模型配置只读，在线路由发布、外部告警、异步大批量导出及正式压测待实现。运营 DAU 当前以创建面试用户定义，不具备访客及报告浏览埋点，漏斗只展示实际采集阶段。
+--- a/tests/test_admin.py
++++ b/tests/test_admin.py
+@@ -3,8 +3,17 @@
+ from sqlalchemy import select
+ 
+ from app.core.security import utcnow
+-from app.db.admin_models import AdminAudit, AdminUser, OrderSnapshot
+-from app.db.models import MediaAsset, Usage
++from app.db.admin_models import (
++    AdminAudit,
++    AdminIdempotency,
++    AdminUser,
++    Approval,
++    OrderSnapshot,
++    PaymentConfig,
++    Product,
++    RefundRequest,
++)
++from app.db.models import MediaAsset, Order, Usage, User
+ from app.modules.admin.auth import create_admin
+ from app.modules.admin.security import totp
+ from tests.conftest import data, interview, login
+@@ -37,15 +46,16 @@
+     assert logs["total"] == 1
+ 
+ 
+-def test_admin_freeze_grant_approval_and_idempotency(client):
++def test_admin_freeze_direct_grant_and_idempotency(client):
+     user, uid = login(client)
+     root, _ = admin_login(client)
+-    reviewer, _ = admin_login(client, "reviewer")
+-    payload = {"quantity": 5, "ticket": "TICKET-1", "reason": "补发系统异常额度"}
+-    approval = data(client.post(f"/api/v1/admin/users/{uid}/entitlements", json=payload, headers=root))
++    payload = {"quantity": 5, "reason": "补发系统异常额度"}
++    result = data(client.post(f"/api/v1/admin/users/{uid}/entitlements", json=payload, headers=root))
++    assert result["status"] == "GRANTED" and result["remaining_interviews"] == 8
++    assert data(client.get("/api/v1/users/me", headers=user))["remaining_interviews"] == 8
+     assert (
+         data(client.post(f"/api/v1/admin/users/{uid}/entitlements", json=payload, headers=root))["id"]
+-        == approval["id"]
++        == result["id"]
+     )
+     assert (
+         client.post(
+@@ -53,13 +63,15 @@
+         ).status_code
+         == 409
+     )
+-    path = f"/api/v1/admin/approvals/{approval['id']}/review"
+-    review = {"approve": True, "reason": "工单核验通过补发"}
+-    assert client.post(path, headers=root, json=review).status_code == 403
+-    data(client.post(path, headers=reviewer, json=review))
+-    assert data(client.get("/api/v1/users/me", headers=user))["remaining_interviews"] == 8
+-    data(client.post(path, headers=reviewer, json=review))
+-    assert data(client.get("/api/v1/users/me", headers=user))["remaining_interviews"] == 8
++    with client.app.state.runtime.db.session() as db:
++        assert (
++            len(
++                db.scalars(select(Usage).where(Usage.user_id == uid, Usage.usage_type == "ADMIN_GRANT")).all()
++            )
++            == 1
++        )
++        assert db.scalar(select(Approval.id)) is None
++        assert db.scalar(select(AdminAudit.id).where(AdminAudit.action == "ENTITLEMENT_GRANTED"))
+     data(
+         client.patch(
+             f"/api/v1/admin/users/{uid}/status",
+@@ -85,22 +97,26 @@
+     }
+ 
+ 
+-def publish_product(client, root, reviewer, amount):
++def publish_product(client, root, amount):
+     root = {**root, "Idempotency-Key": "product-" + str(amount)}
+     product = data(client.post("/api/v1/admin/products", headers=root, json=product_payload(amount)))
+-    approval = data(
++    result = data(
+         client.post(
+             f"/api/v1/admin/products/{product['id']}/publish",
+             headers=root,
+-            json={"reason": "申请发布年度商品"},
+-        )
+-    )
+-    data(
+-        client.post(
+-            f"/api/v1/admin/approvals/{approval['id']}/review",
+-            headers=reviewer,
+-            json={"approve": True, "reason": "复核定价和权益通过"},
+-        )
++            json={"reason": "直接发布年度商品"},
++        )
++    )
++    assert result["status"] == "PUBLISHED" and result["id"] == product["id"]
++    assert (
++        data(
++            client.post(
++                f"/api/v1/admin/products/{product['id']}/publish",
++                headers=root,
++                json={"reason": "直接发布年度商品"},
++            )
++        )["id"]
++        == product["id"]
+     )
+     return product
+ 
+@@ -108,8 +124,7 @@
+ def test_price_snapshots_and_refund_ledger(client):
+     user, uid = login(client)
+     root, _ = admin_login(client)
+-    reviewer, _ = admin_login(client, "reviewer")
+-    publish_product(client, root, reviewer, 39900)
++    publish_product(client, root, 39900)
+     order = data(
+         client.post(
+             "/api/v1/billing/orders",
+@@ -117,7 +132,7 @@
+             json={"product_code": "MEMBER_YEAR"},
+         )
+     )
+-    publish_product(client, root, reviewer, 49900)
++    publish_product(client, root, 49900)
+     assert data(client.get("/api/v1/billing/orders/" + order["id"], headers=user))["amount_minor"] == 39900
+     with client.app.state.runtime.db.session() as db:
+         snapshot = db.scalar(select(OrderSnapshot).where(OrderSnapshot.order_id == order["id"]))
+@@ -134,12 +149,16 @@
+             json={"order_id": order["id"], "reason": "按用户申请全额退款"},
+         )
+     )
+-    data(
+-        client.post(
+-            f"/api/v1/admin/approvals/{refund['approval_id']}/review",
+-            headers=reviewer,
+-            json={"approve": True, "reason": "核验未使用额度通过"},
+-        )
++    assert refund["status"] == "SUCCEEDED" and "approval_id" not in refund
++    assert (
++        data(
++            client.post(
++                "/api/v1/admin/refunds",
++                headers=root,
++                json={"order_id": order["id"], "reason": "按用户申请全额退款"},
++            )
++        )["id"]
++        == refund["id"]
+     )
+     assert data(client.get("/api/v1/billing/orders/" + order["id"], headers=user))["status"] == "REFUNDED"
+     assert data(client.get("/api/v1/users/me", headers=user))["remaining_interviews"] == 3
+@@ -272,3 +291,185 @@
+             json={"reason": "已确认渠道账单重复导入"},
+         )
+     )
++
++
++def test_direct_payment_configuration_and_permissions(client):
++    finance, _ = admin_login(client, "finance", "FINANCE")
++    payload = {
++        "environment": "sandbox",
++        "merchant_id": "merchant-test",
++        "app_id": "app-test",
++        "secret_ref": "kms://payments/test-secret",
++        "notify_url": "https://api.example.com/notify",
++        "enabled": False,
++        "reason": "保存沙箱支付配置",
++    }
++    response = data(client.put("/api/v1/admin/payment-channels/WECHAT", headers=finance, json=payload))
++    assert response["version"] == 1 and not response["enabled"]
++    assert (
++        data(client.put("/api/v1/admin/payment-channels/WECHAT", headers=finance, json=payload)) == response
++    )
++    assert data(client.get("/api/v1/admin/payment-channels", headers=finance))["items"][0]["version"] == 1
++    second = data(
++        client.put(
++            "/api/v1/admin/payment-channels/WECHAT",
++            headers={**finance, "Idempotency-Key": "next"},
++            json=payload,
++        )
++    )
++    assert second["version"] == 2
++    assert (
++        client.put(
++            "/api/v1/admin/payment-channels/WECHAT",
++            headers={**finance, "Idempotency-Key": "enable"},
++            json={**payload, "enabled": True},
++        ).status_code
++        == 409
++    )
++    support, _ = admin_login(client, "support", "SUPPORT")
++    assert (
++        client.put("/api/v1/admin/payment-channels/WECHAT", headers=support, json=payload).status_code == 403
++    )
++    with client.app.state.runtime.db.session() as db:
++        assert db.scalar(select(Approval.id)) is None
++        config = db.scalar(select(PaymentConfig))
++        assert "merchant-test" not in config.config_encrypted
++        assert db.scalar(select(AdminAudit.id).where(AdminAudit.action == "PAYMENT_CONFIG_SAVED"))
++
++
++def test_approval_routes_removed_and_legacy_product_can_publish(client):
++    root, aid = admin_login(client)
++    assert client.get("/api/v1/admin/approvals", headers=root).status_code == 404
++    assert (
++        client.post(
++            "/api/v1/admin/approvals/old/review",
++            headers=root,
++            json={"approve": True, "reason": "尝试使用历史审批接口"},
++        ).status_code
++        == 404
++    )
++    schema = client.get("/openapi.json").json()
++    assert not any("/admin/approvals" in path for path in schema["paths"])
++    assert not any(
++        p.startswith("approval:")
++        for r in data(client.get("/api/v1/admin/roles", headers=root))["items"]
++        for p in r["permissions"]
++    )
++    product = data(client.post("/api/v1/admin/products", headers=root, json=product_payload(39900)))
++    with client.app.state.runtime.db.session() as db:
++        db.get(Product, product["id"]).status = "IN_REVIEW"
++        db.add(
++            Approval(
++                applicant_id=aid,
++                kind="PRODUCT_PUBLISH",
++                resource_id=product["id"],
++                payload_encrypted="historical",
++                reason="历史待审批记录",
++            )
++        )
++    result = data(
++        client.post(
++            f"/api/v1/admin/products/{product['id']}/publish",
++            headers=root,
++            json={"reason": "直接发布历史待处理商品"},
++        )
++    )
++    assert result["status"] == "PUBLISHED"
++    with client.app.state.runtime.db.session() as db:
++        assert len(db.scalars(select(Approval)).all()) == 1
++        assert db.scalar(select(Approval)).status == "PENDING"
++
++
++def test_refund_failure_does_not_create_pending_requests(client):
++    user, uid = login(client)
++    finance, _ = admin_login(client, "finance", "FINANCE")
++    order = data(
++        client.post(
++            "/api/v1/billing/orders",
++            headers={**user, "Idempotency-Key": "order"},
++            json={"product_code": "SINGLE"},
++        )
++    )
++    data(
++        client.post(
++            f"/api/v1/billing/orders/{order['id']}/dev-pay", headers={**user, "Idempotency-Key": "pay"}
++        )
++    )
++    rt = client.app.state.runtime
++    payload = {"order_id": order["id"], "reason": "用户要求退回未使用额度"}
++    with rt.db.session() as db:
++        db.get(Order, order["id"]).provider_trade_no = "wechat:live-order"
++    assert client.post("/api/v1/admin/refunds", headers=finance, json=payload).status_code == 503
++    with rt.db.session() as db:
++        assert db.scalar(select(RefundRequest.id)) is None
++        assert db.get(Order, order["id"]).status == "PAID"
++        db.get(Order, order["id"]).provider_trade_no = "dev:" + order["id"]
++        db.get(User, uid).credits = 0
++    assert client.post("/api/v1/admin/refunds", headers=finance, json=payload).status_code == 409
++    with rt.db.session() as db:
++        assert db.scalar(select(RefundRequest.id)) is None
++        assert db.get(Order, order["id"]).status == "PAID"
++        assert db.scalar(select(Usage.id).where(Usage.usage_type == "REFUND")) is None
++        assert db.scalar(select(Approval.id)) is None
++
++
++def test_direct_grant_ignores_old_pending_response_and_preserves_roles(client):
++    import hashlib
++    import json
++
++    user, uid = login(client)
++    support, aid = admin_login(client, "support", "SUPPORT")
++    rt = client.app.state.runtime
++    payload = {"quantity": 2, "reason": "直接补发修复失败额度"}
++    with rt.db.session() as db:
++        db.add(
++            AdminIdempotency(
++                admin_id=aid,
++                scope="user:grant:" + uid,
++                key="test-key",
++                request_hash=hashlib.sha256(b"old").hexdigest(),
++                response_encrypted=rt.security.encrypt(json.dumps({"status": "PENDING"})),
++            )
++        )
++    result = data(client.post(f"/api/v1/admin/users/{uid}/entitlements", headers=support, json=payload))
++    assert result["status"] == "GRANTED"
++    assert data(client.get("/api/v1/users/me", headers=user))["remaining_interviews"] == 5
++    quality, _ = admin_login(client, "quality", "QUALITY")
++    assert (
++        client.post(f"/api/v1/admin/users/{uid}/entitlements", headers=quality, json=payload).status_code
++        == 403
++    )
++    assert data(client.get("/api/v1/users/me", headers=user))["remaining_interviews"] == 5
++
++
++def test_legacy_pending_refund_can_be_completed_directly(client):
++    user, _ = login(client)
++    root, aid = admin_login(client)
++    order = data(
++        client.post(
++            "/api/v1/billing/orders",
++            headers={**user, "Idempotency-Key": "order"},
++            json={"product_code": "SINGLE"},
++        )
++    )
++    data(
++        client.post(
++            f"/api/v1/billing/orders/{order['id']}/dev-pay", headers={**user, "Idempotency-Key": "pay"}
++        )
++    )
++    with client.app.state.runtime.db.session() as db:
++        old = RefundRequest(order_id=order["id"], applicant_id=aid, amount_minor=990, reason="历史待审批退款")
++        db.add(old)
++        db.flush()
++        old_id = old.id
++    result = data(
++        client.post(
++            "/api/v1/admin/refunds",
++            headers=root,
++            json={"order_id": order["id"], "reason": "直接执行历史退款事项"},
++        )
++    )
++    assert result["status"] == "SUCCEEDED"
++    with client.app.state.runtime.db.session() as db:
++        assert db.get(RefundRequest, old_id).status == "REJECTED"
++        assert db.get(RefundRequest, result["id"]).status == "SUCCEEDED"

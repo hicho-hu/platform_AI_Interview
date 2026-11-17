@@ -119,8 +119,8 @@ export function FinancePage() {
                     render: (v) => <Id value={v} />,
                   },
                   {
-                    title: "用户",
-                    dataIndex: "user_id",
+                    title: "用户 UID",
+                    dataIndex: "user_uid",
                     render: (v) => <Id value={v} />,
                   },
                   { title: "商品 SKU", dataIndex: "product_code" },

@@ -25,9 +25,9 @@ config=Config(str(backend/'alembic.ini'));config.attributes['database_url']=sett
 command.upgrade(config,'head')
 app=create_app(settings)
 with app.state.runtime.db.session() as db:
-    for name,role in [('admin','SUPER_ADMIN'),('finance','FINANCE')]:
+    for name,role in [('admin','SUPER_ADMIN'),('finance','FINANCE'),('uid-admin','SUPER_ADMIN')]:
         if not db.scalar(select(AdminUser).where(AdminUser.login_name==name)):
-            create_admin(db,name,{'admin':'运营管理员','finance':'财务管理员'}[name],'Admin-e2e-password-2026',role)
+            create_admin(db,name,{'admin':'运营管理员','finance':'财务管理员','uid-admin':'UID验收管理员'}[name],'Admin-e2e-password-2026',role)
 with TestClient(app) as client:
     from tests.conftest import login,interview,data
     user,_=login(client,'admin-e2e-user')

@@ -32,8 +32,8 @@ export function UsersPage() {
   const [action, setAction] = useState("");
   const mutation = useAction();
   const detail = useQuery({
-    queryKey: ["user", selected?.id],
-    queryFn: () => api(`/users/${selected!.id}`),
+    queryKey: ["user", selected?.uid],
+    queryFn: () => api(`/users/${selected!.uid}`),
     enabled: !!selected,
   });
   const d = detail.data;
@@ -62,7 +62,7 @@ export function UsersPage() {
                 <div>
                   <strong>{r.nickname}</strong>
                   <small>
-                    <Id value={r.id} />
+                    <Id value={r.uid} />
                   </small>
                 </div>
               </div>
@@ -104,7 +104,7 @@ export function UsersPage() {
               <div className="detail-summary">
                 <div>
                   <h2>{d.nickname}</h2>
-                  <span className="mono">{d.id}</span>
+                  <span className="mono">UID {d.uid}</span>
                 </div>
                 <Status value={d.status} />
               </div>
@@ -291,7 +291,7 @@ export function UsersPage() {
         initial={{ quantity: 1, mode: "TEXT" }}
         onSubmit={(values) =>
           mutation.run(
-            `/users/${selected?.id}/${action === "grant" ? "entitlements" : "status"}`,
+            `/users/${selected?.uid}/${action === "grant" ? "entitlements" : "status"}`,
             action === "grant" ? "POST" : "PATCH",
             action === "grant"
               ? values
@@ -371,7 +371,15 @@ export function InterviewsPage() {
               </div>
             ),
           },
-          { title: "用户", dataIndex: "nickname" },
+          {
+            title: "用户",
+            render: (_, r) => (
+              <div className="stack">
+                <span>{r.nickname}</span>
+                <Id value={r.user_uid} />
+              </div>
+            ),
+          },
           {
             title: "面试模式",
             dataIndex: "mode",
@@ -421,8 +429,8 @@ export function InterviewsPage() {
                 items={[
                   {
                     key: "user",
-                    label: "用户 ID",
-                    children: <Id value={d.user_id} />,
+                    label: "用户 UID",
+                    children: <Id value={d.user_uid} />,
                   },
                   { key: "mode", label: "模式", children: modeLabel[d.mode] },
                   {

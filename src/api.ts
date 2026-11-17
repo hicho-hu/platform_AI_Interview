@@ -98,7 +98,11 @@ export const money = (value = 0) =>
 export const dateTime = (value?: string) =>
   value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
 export const shortId = (value?: string) =>
-  value ? value.slice(0, 8).toUpperCase() : "—";
+  value
+    ? /^[0-9]+$/.test(value)
+      ? value
+      : value.slice(0, 8).toUpperCase()
+    : "—";
 export const roleLabels: Record<string, string> = {
   SUPER_ADMIN: "超级管理员",
   OPERATIONS: "运营管理员",

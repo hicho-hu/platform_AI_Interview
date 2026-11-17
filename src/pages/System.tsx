@@ -275,7 +275,7 @@ export function SystemPage() {
                   {
                     title: "资源",
                     dataIndex: "resource_id",
-                    render: (v) => <Id value={v} />,
+                    render: (v, r) => <Id value={r.resource_uid || v} />,
                   },
                   { title: "操作原因", dataIndex: "reason", ellipsis: true },
                   {

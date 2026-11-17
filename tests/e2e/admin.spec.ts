@@ -26,8 +26,11 @@ test("真实 API 登录、全部模块导航、用户与面试详情", async ({ 
   await page.getByRole("button", { name: "查看详情" }).first().click();
   await expect(page.getByText("用户详情", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(page.getByText("用户详情", { exact: true })).toBeHidden();
   await page.getByRole("link", { name: "面试中心" }).click();
+  await expect(page.getByRole("heading", { name: "面试中心", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "查看详情" }).first().click();
+  await expect(page.getByText("面试详情", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "查看面试内容" }).click();
   await expect(page.getByText("面试内容已加载", { exact: true })).toBeVisible();
   await expect(
@@ -71,7 +74,7 @@ test("同一管理员创建商品并直接发布", async ({ page }) => {
     .getByRole("row")
     .filter({ hasText: "浏览器验收套餐" })
     .first();
-  await row.getByRole("button", { name: "发布商品" }).click();
+  await row.getByRole("button", { name: "上线", exact: true }).click();
   await page.getByLabel("操作原因").fill("直接发布首期训练商品");
   await page.getByRole("button", { name: "确认提交" }).click();
   await expect(page.getByText("商品已发布，立即生效")).toBeVisible();
@@ -86,6 +89,7 @@ test("同一管理员直接补发权益，工单可不填", async ({ page }) => 
     await (await page.request.get("/api/v1/admin/users", { headers })).json()
   ).data.items;
   const user = users[0];
+  expect(user.uid).toMatch(/^[1-9][0-9]{7,}$/);
   await page.getByRole("link", { name: "用户中心", exact: true }).click();
   await page.getByRole("button", { name: "查看详情" }).first().click();
   await page.getByRole("button", { name: "补发权益", exact: true }).click();
@@ -97,7 +101,7 @@ test("同一管理员直接补发权益，工单可不填", async ({ page }) => 
   await expect(page.getByText("权益已补发，立即生效")).toBeVisible();
   const updated = (
     await (
-      await page.request.get(`/api/v1/admin/users/${user.id}`, { headers })
+      await page.request.get(`/api/v1/admin/users/${user.uid}`, { headers })
     ).json()
   ).data;
   expect(updated.interview_credits.VOICE).toBe(
@@ -205,6 +209,7 @@ test("后台配置分类邀请奖励、创建佣金链接并查看退款冲销�
   await page.getByRole("button", { name: "创建推广链接", exact: true }).click();
   await page.getByLabel("推广活动名称", { exact: true }).fill("浏览器推广活动");
   await page.getByLabel("推广人或合作方", { exact: true }).fill("浏览器推广员");
+  await page.getByLabel("佣金人支付宝账号", { exact: true }).fill("uid-e2e-promoter@example.com");
   await page.getByLabel("佣金比例（%）", { exact: true }).fill("12.50");
   await page.getByLabel("操作原因").fill("验证后台创建分佣推广链接");
   await page.getByRole("button", { name: "确认提交", exact: true }).click();
@@ -227,6 +232,6 @@ test("后台配置分类邀请奖励、创建佣金链接并查看退款冲销�
   });
   await page.getByRole("tab", { name: "佣金台账", exact: true }).click();
   await expect(
-    page.getByRole("columnheader", { name: "固化比例", exact: true }),
+    page.getByRole("columnheader", { name: "支付宝账号", exact: true }),
   ).toBeVisible();
 });

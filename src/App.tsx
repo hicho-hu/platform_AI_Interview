@@ -72,6 +72,7 @@ const SystemPage = lazy(() =>
   import("./pages/System").then((m) => ({ default: m.SystemPage })),
 );
 const GrowthPage = lazy(() => import("./pages/Growth"));
+const QuestionBank = lazy(() => import("./pages/QuestionBank"));
 const nav = [
   {
     group: "工作空间",
@@ -143,6 +144,13 @@ const nav = [
     group: "平台管理",
     items: [
       {
+        to: "/question-bank",
+        name: "公司与岗位题库",
+        en: "Question Bank",
+        icon: ClipboardCheck,
+        permission: "question:read",
+      },
+      {
         to: "/ai-ops",
         name: "AI 运营",
         en: "AI Operations",
@@ -195,7 +203,7 @@ function Login() {
             <AudioLines size={24} />
           </span>
           <span>
-            面试引擎 <small>INTERVIEW ENGINE</small>
+            AI面试官 <small>运营管理后台</small>
           </span>
         </Link>
         <div className="login-copy">
@@ -284,7 +292,7 @@ function Login() {
           </div>
         </div>
         <div className="login-bottom">
-          AI 模拟面试平台 <span>运营管理系统 v1.0</span>
+          AI面试官 <span>运营管理系统 v1.0</span>
         </div>
       </div>
     </div>
@@ -335,6 +343,7 @@ function Shell() {
     "/payments": <PaymentsPage />,
     "/growth": <GrowthPage />,
     "/ai-ops": <AIPage />,
+    "/question-bank": <QuestionBank />,
     "/system": <SystemPage />,
   };
   return (
@@ -345,7 +354,7 @@ function Shell() {
             <AudioLines size={23} />
           </span>
           <span>
-            面试引擎<small>运营管理后台</small>
+            AI面试官<small>运营管理后台</small>
           </span>
         </Link>
         <button
@@ -358,7 +367,7 @@ function Shell() {
         <div className="workspace">
           <span className="workspace-avatar">AI</span>
           <div>
-            <strong>AI 模拟面试平台</strong>
+            <strong>AI面试官</strong>
             <small>运营工作空间</small>
           </div>
           <ChevronDown size={14} />
@@ -395,7 +404,7 @@ function Shell() {
             <ChevronRight size={14} />
           </button>
           <small className="sidebar-version">
-            INTERVIEW ENGINE <span>v1.0</span>
+            运营管理后台 <span>v1.0</span>
           </small>
         </div>
       </aside>
@@ -509,7 +518,7 @@ function Shell() {
             </Routes>
           </Suspense>
           <footer className="page-footer">
-            <span>© {new Date().getFullYear()} 面试引擎 · AI 模拟面试平台</span>
+            <span>© {new Date().getFullYear()} AI面试官 · 运营管理系统</span>
             <span>
               <ShieldCheck size={12} /> 安全访问，操作可追溯
             </span>

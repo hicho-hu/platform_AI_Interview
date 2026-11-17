@@ -1,4 +1,4 @@
-# AI 模拟面试 · 运营管理后台
+# AI面试官 · 运营管理后台
 
 独立的 React + TypeScript + Vite 管理端，复用 `/Users/huichao/PycharmProjects/AI_Interview` 的 FastAPI 业务服务。依据两份 V1.0 PDF 实现运营、用户、面试审阅、质检、商品、财务、支付配置、AI 成本及系统管理。
 

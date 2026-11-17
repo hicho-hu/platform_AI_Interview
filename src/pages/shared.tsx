@@ -6,6 +6,12 @@ import type { ColumnsType } from "antd/es/table";
 import type { Page, Row } from "../api";
 import { api } from "../api";
 import { empty, ErrorView, Refresh } from "../components";
+const searchHints: Record<string, string> = {
+  "/users": "输入 UID 或昵称搜索",
+  "/interviews": "输入 UID、面试号或岗位搜索",
+  "/orders": "输入 UID 或订单号搜索",
+  "/audit-logs": "输入操作类型或用户 UID",
+};
 export function useAction() {
   const { message } = App.useApp();
   const client = useQueryClient();
@@ -90,7 +96,7 @@ export function DataTable({
           <Input
             style={{ width: 270 }}
             prefix={<Search size={15} />}
-            placeholder="输入关键词搜索"
+            placeholder={searchHints[path.split("?")[0]] || "输入关键词搜索"}
             value={input}
             allowClear
             onChange={(e) => {

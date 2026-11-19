@@ -28,6 +28,12 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           controlHeight: 35,
         },
         components: {
+          Select: {
+            borderRadius: 10,
+            optionSelectedBg: "#edf2ff",
+            optionSelectedColor: "#3d65ec",
+            optionActiveBg: "#f4f6fb",
+          },
           Table: {
             headerBg: "#f8f9fc",
             rowHoverBg: "#f8f7ff",

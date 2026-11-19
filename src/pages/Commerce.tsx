@@ -422,6 +422,7 @@ export function ProductsPage() {
               <div className="stack">
                 <strong>{r.credits} 次合计</strong>
                 <small>{entitlementText(r)}</small>
+                {!!r.vip_days && <Tag color="gold">VIP {r.vip_days} 天</Tag>}
               </div>
             ),
           },
@@ -462,12 +463,15 @@ export function ProductsPage() {
                       下线
                     </Button>
                   )}
-                  {!['DRAFT', 'IN_REVIEW'].includes(r.status) && (
-                    <Button type="link" onClick={() => {
-                      setSelected(r);
-                      setEditing(false);
-                      setOpen(true);
-                    }}>
+                  {!["DRAFT", "IN_REVIEW"].includes(r.status) && (
+                    <Button
+                      type="link"
+                      onClick={() => {
+                        setSelected(r);
+                        setEditing(false);
+                        setOpen(true);
+                      }}
+                    >
                       新建版本
                     </Button>
                   )}
@@ -477,7 +481,9 @@ export function ProductsPage() {
         ]}
       />
       <EditModal
-        title={editing ? "编辑商品草稿" : selected ? "新建商品版本" : "新建商品草稿"}
+        title={
+          editing ? "编辑商品草稿" : selected ? "新建商品版本" : "新建商品草稿"
+        }
         open={open}
         initial={
           selected
@@ -491,6 +497,7 @@ export function ProductsPage() {
               }
             : {
                 kind: "SINGLE",
+                vip_days: 0,
                 text_credits: 3,
                 voice_credits: 2,
                 video_credits: 1,
@@ -559,6 +566,11 @@ export function ProductsPage() {
             node: <InputNumber min={0} max={10000} precision={0} />,
           })),
           {
+            name: "vip_days",
+            label: "VIP有效天数（0为不含VIP）",
+            node: <InputNumber min={0} max={3650} precision={0} />,
+          },
+          {
             name: "validity_days",
             label: "配置有效天数（暂不执行到期回收）",
             node: <InputNumber min={1} max={3650} precision={0} />,
@@ -572,7 +584,7 @@ export function ProductsPage() {
           reasonField,
         ]}
         busy={action.busy}
-        description="各类型可设为 0，合计至少 1 次。旧通用套餐创建新版本时，请重新确认分类次数。"
+        description="须包含至少1次面试或VIP有效天数。纯VIP商品可将所有面试次数设为0；VIP天数写入订单快照，支付后生效。"
         onSubmit={(v) => {
           const allowed = [
             "code",
@@ -581,19 +593,24 @@ export function ProductsPage() {
             "amount_minor",
             "original_minor",
             "validity_days",
+            "vip_days",
             "description",
             "reason",
           ];
-          return action.run(editing ? `/products/${selected?.id}` : "/products", editing ? "PUT" : "POST", {
-            ...Object.fromEntries(
-              allowed.filter((k) => v[k] !== undefined).map((k) => [k, v[k]]),
-            ),
-            interview_credits: {
-              TEXT: v.text_credits,
-              VOICE: v.voice_credits,
-              VIDEO: v.video_credits,
+          return action.run(
+            editing ? `/products/${selected?.id}` : "/products",
+            editing ? "PUT" : "POST",
+            {
+              ...Object.fromEntries(
+                allowed.filter((k) => v[k] !== undefined).map((k) => [k, v[k]]),
+              ),
+              interview_credits: {
+                TEXT: v.text_credits,
+                VOICE: v.voice_credits,
+                VIDEO: v.video_credits,
+              },
             },
-          });
+          );
         }}
       />
       <EditModal

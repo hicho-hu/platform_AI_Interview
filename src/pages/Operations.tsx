@@ -112,6 +112,22 @@ export function UsersPage() {
                 column={2}
                 items={[
                   {
+                    key: "membership",
+                    label: "会员等级",
+                    children: d.membership?.active ? (
+                      <Tag color="gold">VIP</Tag>
+                    ) : (
+                      "普通用户"
+                    ),
+                  },
+                  {
+                    key: "membership-expiry",
+                    label: "VIP有效期",
+                    children: d.membership?.expires_at
+                      ? dateTime(d.membership.expires_at)
+                      : "—",
+                  },
+                  {
                     key: "credits",
                     label: "可用次数",
                     children: `${d.remaining_interviews ?? d.credits} 次`,
@@ -244,7 +260,7 @@ export function UsersPage() {
       <EditModal
         title={
           action === "grant"
-            ? "补发面试额度"
+            ? "发放用户权益"
             : d?.status === "ACTIVE"
               ? "冻结用户账户"
               : "解除账户冻结"
@@ -254,7 +270,7 @@ export function UsersPage() {
         busy={mutation.busy}
         description={
           action === "grant"
-            ? "提交后立即增加用户面试额度，并写入权益账本和操作审计。"
+            ? "提交后立即发放对应权益并记录审计。选择VIP时，数量表示有效天数。"
             : "账号状态变更将立即生效，并记录操作审计。"
         }
         fields={
@@ -262,7 +278,7 @@ export function UsersPage() {
             ? [
                 {
                   name: "mode",
-                  label: "面试类型",
+                  label: "权益类型",
                   node: (
                     <Select
                       options={[
@@ -270,13 +286,14 @@ export function UsersPage() {
                         { value: "VOICE", label: "语音面试" },
                         { value: "VIDEO", label: "视频面试" },
                         { value: "UNIVERSAL", label: "通用次数（兼容旧权益）" },
+                        { value: "VIP", label: "VIP会员（按天发放）" },
                       ]}
                     />
                   ),
                 },
                 {
                   name: "quantity",
-                  label: "补发次数",
+                  label: "发放数量（VIP为天数，其他为次数）",
                   node: <InputNumber min={1} max={1000} />,
                 },
                 {
